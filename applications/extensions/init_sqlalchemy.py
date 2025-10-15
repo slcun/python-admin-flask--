@@ -1,7 +1,9 @@
 import datetime
+import os
 
 from flask import Flask, request
-from flask_sqlalchemy import SQLAlchemy, BaseQuery
+from flask_sqlalchemy import SQLAlchemy
+from flask_sqlalchemy.query import Query as BaseQuery
 from flask_marshmallow import Marshmallow
 from marshmallow import fields
 from marshmallow.validate import (
@@ -55,15 +57,55 @@ class Query(BaseQuery):
     def logic_all(self):
         return self.filter_by(delete_at=None).all()
 
-    def layui_paginate(self):
-        """
-        layui表格分页
-        page
-        limit
-        """
-        return self.paginate(page=request.args.get('page', type=int),
-                             per_page=request.args.get('limit', type=int),
-                             error_out=False)
+    def all_json(self, schema: Marshmallow().Schema):
+        return schema(many=True).dump(self.all())
+
+    def layui_paginate(self, page=None, limit=None):
+        if page is None:
+            page = request.args.get('page', type=int)
+        if limit is None:
+            limit = min(request.args.get('limit', default=10, type=int), 90)
+
+        return self.paginate(page=page,
+                             per_page=limit,
+                             error_out=False
+                             )
+
+    def layui_paginate_json(self, schema, page=None, limit=None):
+        if page is None:
+            page = request.args.get('page', 1, type=int)  # 添加默认值
+        if limit is None:
+            limit = request.args.get('limit', 10, type=int)  # 添加默认值
+
+        _res = self.paginate(
+            page=page,
+            per_page=limit,
+            error_out=False
+        )
+        return schema(many=True).dump(_res.items), _res.total, _res.page, _res.per_page
+
+    def layui_paginate_db_json(self, page=None, limit=None):
+        if page is None:
+            page = request.args.get('page', 1, type=int)  # 添加默认值
+        if limit is None:
+            limit = request.args.get('limit', 10, type=int)  # 添加默认值
+
+        _res = self.paginate(
+            page=page,
+            per_page=limit,
+            error_out=False
+        )
+
+        # 获取查询的列名列表
+        column_names = [col["name"] for col in self.column_descriptions]
+
+        # 将元组转换为字典（支持单列或多列）
+        data = [
+            dict(zip(column_names, row))
+            for row in _res.items
+        ]
+
+        return data, _res.total, _res.page, _res.per_page
 
 
 db = SQLAlchemy(query_class=Query)
@@ -73,3 +115,9 @@ ma = Marshmallow()
 def init_databases(app: Flask):
     db.init_app(app)
     ma.init_app(app)
+    if os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
+        with app.app_context():
+            try:
+                db.engine.connect()
+            except Exception as e:
+                exit(f"数据库连接失败: {e}")

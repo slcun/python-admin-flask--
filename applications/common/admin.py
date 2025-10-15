@@ -1,69 +1,22 @@
-import copy
-from collections import OrderedDict
 from io import BytesIO
-from flask import session, make_response, current_app
+from flask import make_response
 from flask_login import current_user
 
-from applications.common.utils.gen_captcha import gen_captcha
-from applications.schemas import PowerOutSchema
+from applications.common.utils.validate import str_escape
+from applications.common.utils.captcha import vieCode
+from applications.extensions import db
+from applications.models import AdminLog
 
 
-# 授权路由存入session
-def add_auth_session():
-    role = current_user.role
-    user_power = []
-    for i in role:
-        if i.enable == 0:
-            continue
-        for p in i.power:
-            if p.enable == 0:
-                continue
-            user_power.append(p.code)
-    session['permissions'] = user_power
-
-
-# 生成菜单树
-def make_menu_tree():
-    role = current_user.role
-    powers = []
-    for i in role:
-        # 如果角色没有被启用就直接跳过
-        if i.enable == 0:
-            continue
-        # 变量角色用户的权限
-        for p in i.power:
-            # 如果权限关闭了就直接跳过
-            if p.enable == 0:
-                continue
-            # 一二级菜单
-            if int(p.type) == 0 or int(p.type) == 1:
-                powers.append(p)
-
-    power_schema = PowerOutSchema(many=True)  # 用已继承 ma.ModelSchema 类的自定制类生成序列化类
-    power_dict = power_schema.dump(powers)  # 生成可序列化对象
-    power_dict.sort(key=lambda x: x['id'], reverse=True)
-
-    menu_dict = OrderedDict()
-    for _dict in power_dict:
-        if _dict['id'] in menu_dict:
-            # 当前节点添加子节点
-            _dict['children'] = copy.deepcopy(menu_dict[_dict['id']])
-            _dict['children'].sort(key=lambda item: item['sort'])
-            # 删除子节点
-            del menu_dict[_dict['id']]
-
-        if _dict['parent_id'] not in menu_dict:
-            menu_dict[_dict['parent_id']] = [_dict]
-        else:
-            menu_dict[_dict['parent_id']].append(_dict)
-    return sorted(menu_dict.get(0), key=lambda item: item['sort'])
-
-
-# 生成验证码
 def get_captcha():
-    code, image = gen_captcha()
+    """
+    生成验证码图片及其对应的验证码字符串。
+
+    :return: 返回验证码图片的响应对象和验证码字符串。
+    """
+    image, code = vieCode().GetCodeImage()
+    code = ''.join(code).lower()
     out = BytesIO()
-    session["code"] = code
     image.save(out, 'png')
     out.seek(0)
     resp = make_response(out.read())
@@ -71,75 +24,73 @@ def get_captcha():
     return resp, code
 
 
-def get_render_config():
-    # 网站配置
-    config = dict(logo={
-        # 网站名称
-        "title": current_app.config.get("SYSTEM_NAME"),
-        # 网站图标
-        "image": "/static/admin/admin/images/logo.png"
-        # 菜单配置
-    }, menu={
-        # 菜单数据来源
-        "data": "/rights/menu",
-        "collaspe": False,
-        # 是否同时只打开一个菜单目录
-        "accordion": True,
-        "method": "GET",
-        # 是否开启多系统菜单模式
-        "control": False,
-        # 顶部菜单宽度 PX
-        "controlWidth": 500,
-        # 默认选中的菜单项
-        "select": "0",
-        # 是否开启异步菜单，false 时 data 属性设置为菜单数据，false 时为 json 文件或后端接口
-        "async": True
-    }, tab={
-        # 是否开启多选项卡
-        "enable": True,
-        # 切换选项卡时，是否刷新页面状态
-        "keepState": True,
-        # 是否开启 Tab 记忆
-        "session": True,
-        # 最大可打开的选项卡数量
-        "max": 30,
-        "index": {
-            # 标识 ID , 建议与菜单项中的 ID 一致
-            "id": "10",
-            # 页面地址
-            "href": "/admin/welcome",
-            # 标题
-            "title": "首页"
-        }
-    }, theme={
-        # 默认主题色，对应 colors 配置中的 ID 标识
-        "defaultColor": "2",
-        # 默认的菜单主题 dark-theme 黑 / light-theme 白
-        "defaultMenu": "dark-theme",
-        # 是否允许用户切换主题，false 时关闭自定义主题面板
-        "allowCustom": True
-    }, colors=[{
-        "id": "1",
-        "color": "#2d8cf0"
-    },
-        {
-            "id": "2",
-            "color": "#5FB878"
-        },
-        {
-            "id": "3",
-            "color": "#1E9FFF"
-        }, {
-            "id": "4",
-            "color": "#FFB800"
-        }, {
-            "id": "5",
-            "color": "darkgray"
-        }
-    ], links=current_app.config.get("SYSTEM_PANEL_LINKS"), other={
-        # 主页动画时长
-        "keepLoad": 1200,
-        # 布局顶部主题
-        "autoHead": False
-    }, header=False)
-    return config
+def normal_log(method, url, ip, user_agent, desc, uid, is_access):
+    """
+    记录通用日志信息到数据库。
+
+    :param method: 请求方法（如 GET、POST）。
+    :param url: 请求的 URL。
+    :param ip: 客户端的 IP 地址。
+    :param user_agent: 客户端的 User-Agent 信息。
+    :param desc: 日志描述信息。
+    :param uid: 用户 ID。
+    :param is_access: 是否成功访问（True 或 False）。
+    :return: 返回日志记录的 ID。
+    """
+    info = {
+        'method': method,
+        'url': url,
+        'ip': ip,
+        'user_agent': user_agent,
+        'desc': desc,
+        'uid': uid,
+        'success': int(is_access)
+    }
+    log = AdminLog(
+        url=info.get('url'),
+        ip=info.get('ip'),
+        user_agent=info.get('user_agent'),
+        desc=info.get('desc'),
+        uid=info.get('uid'),
+        method=info.get('method'),
+        success=info.get('success')
+    )
+    db.session.add(log)
+    db.session.commit()
+    return log.id
+
+
+def login_log(request, uid, is_access):
+    """
+    记录用户登录日志。
+
+    :param request: Flask 请求对象。
+    :param uid: 用户 ID。
+    :param is_access: 是否成功登录（True 或 False）。
+    :return: 返回日志记录的 ID。
+    """
+    method = request.method
+    url = request.path
+    ip = request.remote_addr
+    user_agent = str_escape(request.headers.get('User-Agent'))
+    desc = str_escape(request.form.get('username'))
+    return normal_log(method, url, ip, user_agent, desc, uid, is_access)
+
+
+def admin_log(request, is_access, desc=None):
+    """
+    记录管理员操作日志。
+
+    :param request: Flask 请求对象。
+    :param is_access: 是否成功操作（True 或 False）。
+    :param desc: 日志描述信息（可选）。如果未提供，则从请求数据中提取。
+    :return: 返回日志记录的 ID。
+    """
+    method = request.method
+    url = request.path
+    ip = request.remote_addr
+    user_agent = str_escape(request.headers.get('User-Agent'))
+    request_data = request.json if request.headers.get('Content-Type') == 'application/json' else request.values
+    if desc is None:
+        desc = str_escape(str(dict(request_data)))
+    return normal_log(method, url, ip, user_agent, desc, current_user.id, is_access)
